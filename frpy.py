@@ -6,11 +6,36 @@ A simple reverse proxy to help you expose a local server behind a NAT or firewal
 frpy_server —— worker_server —— user_side
 |
 frpy_client —— local_server_side
+
+[Usage]
+-- server side --
+# start frpy.py server on 8000 port
+$ python frpy.py server 0.0.0.0 8000
+
+-- client side --
+# start a website on 8080 port (or existing tcp service)
+$ python -m http.server 8080
+
+# start frpy.py client connecting to server, and expose the local tcp service to server
+$ python frpy.py client server.domain.com 8000 127.0.0.1 8080 60080
+
+# view the website on server with 60080 port
+$ curl http://server.domain.com:60080
+
+todo:
+- improve concurrent performance and speed
+- client can restart at will
+- handle user disconnected
+- test mysql
+- test tslow.cn website
+- ctrl + c to break server
 """
 
 import logging
 import random
+import select
 import socket
+import sys
 import threading
 import time
 import traceback
@@ -18,14 +43,22 @@ from _thread import start_new_thread
 
 
 # =========== Conf ===========
-BUFFER_SIZE = 1024
+SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 8000
+LOCAL_HOST = '127.0.0.1'
+LOCAL_PORT = 8080
+REMOTE_PORT = 60080
+BUFFER_SIZE = 1024
 # =============================
 
 
 logging.basicConfig(level=logging.DEBUG)
 server_logger = logging.getLogger('Server')
+client_logger = logging.getLogger('Client')
+state = {}
 
+
+# ---------- for server side ---------
 
 class EasyTcpServer:
     """
@@ -133,6 +166,7 @@ class MainServer(EasyTcpServer):
             'parent_socket': client_socket,
         }
         start_new_thread(self.start_worker_server, (), kwargs)
+        server_logger.debug(threading.enumerate())
 
     def start_worker_server(self, remote_port, parent_socket):
         # parent_socket is a socket between frpy server and frpy client
@@ -205,10 +239,156 @@ class MainServer(EasyTcpServer):
             server_logger.debug(traceback.format_exc())
             server_logger.error('-----------------------------------------')
 
-        # todo: improve and fix it
-        # time.sleep(0.1)
+
+# ---------- for client side ---------
+
+def write_to_local(client_socket):
+    buffer = b''
+    while True:
+        s_read, _, _ = select.select([client_socket], [], [], 0.5)
+        if not s_read:
+            continue
+
+        s = s_read[0]
+        data = s.recv(BUFFER_SIZE + 22)
+
+        client_logger.debug('data from server %s', data)
+
+        buffer += data
+        index = buffer.find(b'</frpy>')
+        if index == -1:
+            continue
+
+        assert buffer.startswith(b'<frpy>'), buffer
+
+        data = buffer[6:index]
+        buffer = buffer[index+7:]
+
+        user_id, data = data.split(b'|', 1)
+
+        # length of user_id: 8
+        assert len(user_id) == 8, user_id
+
+        if user_id in state:
+            local_socket = state[user_id]['local_socket']
+        else:
+            local_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            local_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+            local_socket.connect((LOCAL_HOST, LOCAL_PORT))
+            state[user_id] = {
+                'local_socket': local_socket,
+            }
+
+        client_logger.info('send to %s %s', local_socket, data)
+        client_logger.debug('state %s', state)
+        local_socket.sendall(data)
 
 
-server = MainServer(port=SERVER_PORT, buffer_size=BUFFER_SIZE)
-server.run()
+def read_from_local(client_socket):
+    while True:
 
+        umap = {}
+        local_sockets = []
+        for key, value in state.items():
+            user_id = key
+            local_socket = value['local_socket']
+            umap[id(local_socket)] = user_id
+            local_sockets.append(local_socket)
+
+        if not local_sockets:
+            time.sleep(0.5)
+            continue
+
+        s_read, _, _ = select.select(local_sockets, [], [], 0.5)
+
+        for s in s_read:
+            data = s.recv(BUFFER_SIZE)
+
+            if data == b'':
+                continue
+
+            client_logger.info('recv from %s: %s', s, data)
+
+            user_id = umap[id(s)]
+
+            # <frpy>12345678|abcdef1234</frpy>
+            # external length: 22
+            data = b'<frpy>' + user_id + b'|' + data + b'</frpy>'
+            client_socket.sendall(data)
+
+
+# -------------------------------
+
+
+print('======== frpy v0.0.1 ========')
+
+args = sys.argv[1:]
+
+if not args:
+    print('Please chose the mode (1 or 2):')
+    print('1. Server')
+    print('2. Client')
+    mode = input()
+    if mode not in ['1', '2']:
+        input('Just entry 1 or 2!')
+        sys.exit()
+    args = [mode]
+
+if args[0] in ['1', 'server']:
+    mode = 'server'
+else:
+    mode = 'client'
+
+if len(args) > 1:
+    SERVER_HOST = args[1]
+
+if len(args) > 2:
+    SERVER_PORT = int(args[2])
+
+if len(args) > 3:
+    LOCAL_HOST = args[3]
+
+if len(args) > 4:
+    LOCAL_PORT = int(args[4])
+
+if len(args) > 5:
+    REMOTE_PORT = int(args[5])
+
+if len(args) > 6:
+    BUFFER_SIZE = int(args[6])
+
+if mode == 'server':
+
+    if len(args) > 3:
+        BUFFER_SIZE = int(args[3])
+
+    client_logger.info('frpy server')
+    client_logger.info('SERVER_HOST: %s', SERVER_HOST)
+    client_logger.info('SERVER_PORT: %s', SERVER_PORT)
+    client_logger.info('BUFFER_SIZE: %s', BUFFER_SIZE)
+
+    server = MainServer(host=SERVER_HOST, port=SERVER_PORT, buffer_size=BUFFER_SIZE)
+    server.run()
+
+else:
+
+    client_logger.info('======== frpy client ========')
+    client_logger.info('SERVER_HOST: %s', SERVER_HOST)
+    client_logger.info('SERVER_PORT: %s', SERVER_PORT)
+    client_logger.info('LOCAL_HOST: %s', LOCAL_HOST)
+    client_logger.info('LOCAL_PORT: %s', LOCAL_PORT)
+    client_logger.info('REMOTE_PORT: %s', REMOTE_PORT)
+    client_logger.info('BUFFER_SIZE: %s', BUFFER_SIZE)
+
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect((SERVER_HOST, SERVER_PORT))
+
+    msg = '<frpy>00000000|%d</frpy>' % REMOTE_PORT
+    client_socket.sendall(msg.encode())
+
+    start_new_thread(write_to_local, (client_socket,), {})
+    start_new_thread(read_from_local, (client_socket,), {})
+
+    while True:
+        client_logger.debug(threading.enumerate())
+        time.sleep(10)
