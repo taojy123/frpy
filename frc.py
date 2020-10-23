@@ -1,3 +1,4 @@
+import logging
 import select
 import socket
 import time
@@ -9,10 +10,10 @@ SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 8000
 REMOTE_PORT = 60080
 LOCAL_HOST = 'tslow.cn'
-LOCAL_PORT = 80
+LOCAL_PORT = 2048
+BUFFER_SIZE = 1024
 # =============================
 
-BUFFER_SIZE = 1024
 
 state = {}
 
@@ -37,8 +38,8 @@ def write_to_local(client_socket):
                 'local_socket': local_socket,
             }
 
-        print('send to', local_socket, data)
-        print('state', state)
+        logging.info('send to', local_socket, data)
+        logging.info('state', state)
         local_socket.sendall(data)
 
 
@@ -65,7 +66,7 @@ def read_from_local(client_socket):
             if data == b'':
                 continue
 
-            print('recv from', s, data)
+            logging.info('recv from', s, data)
 
             user_id = umap[id(s)]
 
@@ -83,6 +84,6 @@ start_new_thread(write_to_local, (client_socket, ), {})
 start_new_thread(read_from_local, (client_socket, ), {})
 
 
-print('=== start frpy client ===')
+logging.info('=== start frpy client ===')
 while True:
     time.sleep(10)
