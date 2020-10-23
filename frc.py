@@ -15,19 +15,38 @@ BUFFER_SIZE = 1024
 # =============================
 
 
+logging.basicConfig(level=logging.DEBUG)
+client_logger = logging.getLogger('Client')
 state = {}
 
 
 def write_to_local(client_socket):
+    buffer = b''
     while True:
         s_read, _, _ = select.select([client_socket], [], [], 0.5)
         if not s_read:
             continue
 
         s = s_read[0]
-        data = s.recv(8 + BUFFER_SIZE)
+        data = s.recv(BUFFER_SIZE + 22)
+
+        client_logger.debug('data from server %s', data)
+
+        buffer += data
+        index = buffer.find(b'</frpy>')
+        if index == -1:
+            continue
+
+        assert buffer.startswith(b'<frpy>'), buffer
+
+        data = buffer[6:index]
+        buffer = buffer[index+7:]
 
         user_id, data = data.split(b'|', 1)
+
+        # length of user_id: 8
+        assert len(user_id) == 8, user_id
+
         if user_id in state:
             local_socket = state[user_id]['local_socket']
         else:
@@ -38,8 +57,8 @@ def write_to_local(client_socket):
                 'local_socket': local_socket,
             }
 
-        logging.info('send to', local_socket, data)
-        logging.info('state', state)
+        client_logger.info('send to %s %s', local_socket, data)
+        client_logger.debug('state %s', state)
         local_socket.sendall(data)
 
 
@@ -66,17 +85,19 @@ def read_from_local(client_socket):
             if data == b'':
                 continue
 
-            logging.info('recv from', s, data)
+            client_logger.info('recv from', s, data)
 
             user_id = umap[id(s)]
 
-            data = user_id + b'|' + data
+            # <frpy>12345678|abcdef1234</frpy>
+            # external length: 22
+            data = b'<frpy>' + user_id + b'|' + data + b'</frpy>'
             client_socket.sendall(data)
 
 
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client_socket.connect((SERVER_HOST, SERVER_PORT))
-msg = '0000000|%d' % REMOTE_PORT
+msg = '<frpy>00000000|%d</frpy>' % REMOTE_PORT
 client_socket.sendall(msg.encode())
 
 
@@ -84,6 +105,6 @@ start_new_thread(write_to_local, (client_socket, ), {})
 start_new_thread(read_from_local, (client_socket, ), {})
 
 
-logging.info('=== start frpy client ===')
+client_logger.info('=== start frpy client ===')
 while True:
     time.sleep(10)

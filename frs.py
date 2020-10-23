@@ -75,6 +75,7 @@ class EasyTcpServer:
         server_logger.info('[shutdown tcp server] on %s:%d', self.host, self.port)
 
     def handle_client(self, client_socket, client_address):
+        # handle a new client connection
         server_logger.info('[new client] on %s:%d, client address: %s', self.host, self.port, client_address)
         while True:
             # synchronous blocking
@@ -107,12 +108,12 @@ class WorkerServer(EasyTcpServer):
         server_logger.debug('data from user: %s', data)
         user_socket = client_socket
 
-        # generate a random id (bytes, length: 7)
+        # generate a random id (bytes, length: 8)
         # don't worry it will repeat
-        n = random.randint(1000000, 9999999)
+        n = random.randint(10000000, 99999999)
         user_id = str(n).encode()
 
-        data = user_id + b'|' + data
+        data = b'<frpy>' + user_id + b'|' + data + b'</frpy>'
         self.parent_socket.sendall(data)
         self.main_server.state[user_id] = {
             'parent_socket': self.parent_socket,
@@ -124,16 +125,6 @@ class MainServer(EasyTcpServer):
 
     workers = []
     state = {}
-
-    def __init__(self, host='0.0.0.0', port=8000, buffer_size=1024):
-        super().__init__(host, port, 8 + buffer_size)
-
-    def split_data(self, data):
-        assert b'|' in data, 'recv error data: %s' % data
-        user_id, data = data.split(b'|', 1)
-        assert len(user_id) == 7, 'recv error data: %s' % data
-        return user_id, data
-
 
     def make_new_worker(self, port, client_socket):
         # make a new server in a new thread. [async]
@@ -149,10 +140,43 @@ class MainServer(EasyTcpServer):
         self.workers.append(worker_server)
         worker_server.run()
 
+    def handle_client(self, client_socket, client_address):
+        # handle a new frpy client connection
+        server_logger.info('[new client] on %s:%d, client address: %s', self.host, self.port, client_address)
+
+        buffer = b''
+        while True:
+
+            data = client_socket.recv(self.buffer_size + 22)
+            server_logger.debug('data from client: %s', data)
+            if data == b'':
+                break
+
+            buffer += data
+            index = buffer.find(b'</frpy>')
+            if index == -1:
+                continue
+
+            assert buffer.startswith(b'<frpy>'), buffer
+
+            data = buffer[6:index]
+            buffer = buffer[index + 7:]
+
+            # synchronous blocking
+            self.handle_recv(client_socket, data)
+
+        self.client_sockets.remove(client_socket)
+        client_socket.close()
+        server_logger.info('[close client] on %s:%d, client address: %s', self.host, self.port, client_address)
+
+    def split_data(self, data):
+        assert b'|' in data, 'recv error data: %s' % data
+        user_id, data = data.split(b'|', 1)
+        assert len(user_id) == 8, 'recv error data: %s' % data
+        return user_id, data
+
     def handle_recv(self, client_socket, data):
         # recv message from frpy client
-
-        server_logger.debug('data from client: %s', data)
 
         if not data:
             server_logger.warning('recv empty data')
@@ -161,7 +185,7 @@ class MainServer(EasyTcpServer):
             user_id, data = self.split_data(data)
 
             # if the first message, make a worker server
-            if user_id == b'0000000':
+            if user_id == b'00000000':
                 port = int(data.decode())
                 self.make_new_worker(port, client_socket)
                 return
